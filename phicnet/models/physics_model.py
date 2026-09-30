@@ -1,8 +1,8 @@
 """
-Physics-Incorporated Operator Module for 2D Heat Diffusion.
+Physics-Incorporated Operator Module for 2D Wave Propagation.
 
 Implements the differential Laplacian operator using 2D convolutions with
-finite-difference stencil kernels as described in PhICNet Section 8 & 9.
+finite-difference stencil kernels to solve the second-order wave equation.
 """
 
 import torch
@@ -10,32 +10,29 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-class PhysicsHeat2D(nn.Module):
+class PhysicsWave2D(nn.Module):
     """
-    Differentiable 2D Heat Equation operator using fixed 3x3 finite-difference convolution kernels.
+    Differentiable 2D Wave Equation operator using fixed 3x3 finite-difference convolution kernels.
     
-    Diffusion update:
-        U_{phy}^{t+1} = U^t + dt * alpha * (d^2 U / dx^2 + d^2 U / dy^2)
+    Wave update:
+        U_{phy}^{t+1} = 2U^t - U^{t-1} + dt^2 * c^2 * (d^2 U / dx^2 + d^2 U / dy^2)
     """
     def __init__(
         self,
-        alpha: float = 0.01,
+        c: float = 2.0,
         dt: float = 0.005,
         dx: float = 1.0 / 63.0,
-        learnable_alpha: bool = False
+        learnable_c: bool = False
     ):
         super().__init__()
         self.dt = dt
         self.dx = dx
 
-        if learnable_alpha:
-            self.alpha = nn.Parameter(torch.tensor(alpha, dtype=torch.float32))
+        if learnable_c:
+            self.c = nn.Parameter(torch.tensor(c, dtype=torch.float32))
         else:
-            self.register_buffer("alpha", torch.tensor(alpha, dtype=torch.float32))
+            self.register_buffer("c", torch.tensor(c, dtype=torch.float32))
 
-        # Directional finite-difference second-derivative kernels (Section 9 of notes)
-        # K_x: d^2/dx^2 = [[0, 0, 0], [1, -2, 1], [0, 0, 0]] / dx^2
-        # K_y: d^2/dy^2 = [[0, 1, 0], [0, -2, 0], [0, 1, 0]] / dy^2
         # Combined 5-point discrete Laplacian kernel:
         laplacian_weight = torch.tensor([
             [[[0.0,  1.0, 0.0],
@@ -71,17 +68,18 @@ class PhysicsHeat2D(nn.Module):
 
         return laplacian
 
-    def forward(self, u: torch.Tensor) -> torch.Tensor:
+    def forward(self, u_curr: torch.Tensor, u_prev: torch.Tensor) -> torch.Tensor:
         """
         Compute physics-only next-state prediction U_{phy}^{t+1}:
-            U_{phy}^{t+1} = U^t + dt * alpha * Laplacian(U^t)
+            U_{phy}^{t+1} = 2U^t - U^{t-1} + dt^2 * c^2 * Laplacian(U^t)
         """
-        orig_dim = u.dim()
+        orig_dim = u_curr.dim()
         if orig_dim == 3:
-            u = u.unsqueeze(1)
+            u_curr = u_curr.unsqueeze(1)
+            u_prev = u_prev.unsqueeze(1)
 
-        laplacian = self.compute_laplacian(u)
-        u_next = u + self.dt * (self.alpha * laplacian)
+        laplacian = self.compute_laplacian(u_curr)
+        u_next = 2.0 * u_curr - u_prev + (self.c ** 2) * (self.dt ** 2) * laplacian
         
         # Enforce boundary condition
         u_next[:, :, 0, :] = 0.0
@@ -96,9 +94,10 @@ class PhysicsHeat2D(nn.Module):
 
 
 if __name__ == "__main__":
-    phy = PhysicsHeat2D(alpha=0.01, dt=0.005, dx=1.0/63.0)
-    x = torch.randn(2, 1, 64, 64)
-    out = phy(x)
-    print(f"Physics operator test: input shape {x.shape} -> output shape {out.shape}")
-    assert out.shape == x.shape, "Shape mismatch!"
+    phy = PhysicsWave2D(c=300.0, dt=0.001, dx=1.0/63.0)
+    u_c = torch.randn(2, 1, 64, 64)
+    u_p = torch.randn(2, 1, 64, 64)
+    out = phy(u_c, u_p)
+    print(f"Physics operator test: input shape {u_c.shape} -> output shape {out.shape}")
+    assert out.shape == u_c.shape, "Shape mismatch!"
     print("Physics operator test passed successfully.")

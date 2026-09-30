@@ -1,14 +1,13 @@
 """
-Composite Physics and Source Losses for PhICNet.
+Composite Physics and Source Losses for PhICNet Wave System.
 
-Loss formulation (Sections 18-21 & 33 in PhICNet notes):
+Loss formulation:
     L = L_pred + beta * L_source + lambda_sparse * L_sparse
 
 Where:
 - L_pred: Prediction error between predicted physical state U_pred and true observation U_true.
 - L_source: Source consistency loss enforcing agreement between learned source S_hat and
-            the physical discrepancy (dU/dt - alpha * Laplacian(U)).
-            *Crucial*: True source labels S are NOT required!
+            the physical discrepancy (d^2U/dt^2 - c^2 * Laplacian(U)).
 - L_sparse: L1 sparsity penalty enforcing spatial localization of the recovered source.
 """
 
@@ -29,20 +28,20 @@ def compute_relative_l2_error(pred: torch.Tensor, target: torch.Tensor, eps: flo
 
 class PhICNetLoss(nn.Module):
     """
-    Multi-term loss function for PhICNet.
+    Multi-term loss function for PhICNet wave equation.
     """
     def __init__(
         self,
         beta_source: float = 0.1,
         lambda_sparse: float = 0.001,
-        alpha: float = 0.01,
+        c: float = 2.0,
         dt: float = 0.005,
         dx: float = 1.0 / 63.0
     ):
         super().__init__()
         self.beta_source = beta_source
         self.lambda_sparse = lambda_sparse
-        self.alpha = alpha
+        self.c = c
         self.dt = dt
         self.dx = dx
 
@@ -67,7 +66,8 @@ class PhICNetLoss(nn.Module):
         u_pred: torch.Tensor,
         u_true: torch.Tensor,
         s_pred: torch.Tensor,
-        u_curr: torch.Tensor
+        u_curr: torch.Tensor,
+        u_prev: torch.Tensor
     ) -> Tuple[torch.Tensor, Dict[str, float]]:
         """
         Args:
@@ -75,23 +75,25 @@ class PhICNetLoss(nn.Module):
             u_true: Ground truth state at next time step (B, T, 1, H, W)
             s_pred: Model predicted source map (B, T, 1, H, W)
             u_curr: Current state observation (B, T, 1, H, W)
+            u_prev: Previous state observation (B, T, 1, H, W)
         """
         # 1. State prediction loss (MSE)
         l_pred = F.mse_loss(u_pred, u_true)
 
         # 2. Source consistency loss
-        # Physical residual: S_res = (U^{t+1} - U^t) / dt - alpha * Laplacian(U^t)
-        b, t, c, h, w = u_curr.shape
-        u_curr_flat = u_curr.reshape(-1, c, h, w)
-        laplacian_curr = self.compute_laplacian(u_curr_flat).reshape(b, t, c, h, w)
+        # Physical residual: S_res = (U^{t+1} - 2U^t + U^{t-1}) / dt^2 - c^2 * Laplacian(U^t)
+        b, t, ch, h, w = u_curr.shape
+        u_curr_flat = u_curr.reshape(-1, ch, h, w)
+        laplacian_curr = self.compute_laplacian(u_curr_flat).reshape(b, t, ch, h, w)
 
-        s_res = (u_true - u_curr) / self.dt - self.alpha * laplacian_curr
+        s_res = (u_true - 2.0 * u_curr + u_prev) / (self.dt ** 2) - (self.c ** 2) * laplacian_curr
+        
         # Zero boundaries where finite-difference stencil has boundary effects
         s_res_interior = s_res[..., 2:-2, 2:-2]
         s_pred_interior = s_pred[..., 2:-2, 2:-2]
         
-        # Only enforce consistency where positive or significant change occurs
-        l_source = F.mse_loss(s_pred_interior, F.relu(s_res_interior))
+        # Wave source is not strictly positive, so enforce MSE without ReLU
+        l_source = F.mse_loss(s_pred_interior, s_res_interior)
 
         # 3. Sparsity loss (L1 norm on predicted source)
         l_sparse = torch.mean(torch.abs(s_pred))

@@ -1,5 +1,5 @@
 """
-Training Pipeline for PhICNet and Comparative Baselines.
+Training Pipeline for PhICNet and Comparative Baselines for Wave Propagation.
 
 Supports:
 - PhICNet (Physics + ConvRNN Source Model)
@@ -20,7 +20,7 @@ from phicnet.models.phicnet import PhICNet, CNNBaseline, ConvLSTMBaseline
 from phicnet.training.losses import PhICNetLoss, compute_relative_l2_error
 
 
-class HeatSequenceDataset(Dataset):
+class WaveSequenceDataset(Dataset):
     """
     Subsequence dataset for spatiotemporal sequence training.
     """
@@ -31,7 +31,7 @@ class HeatSequenceDataset(Dataset):
         data = np.load(npz_path)
         self.u = data["u"]  # (N, T, H, W)
         self.s = data["s"]  # (N, T, H, W)
-        self.alpha = float(data.get("alpha", 0.01))
+        self.c = float(data.get("c", 2.0))
         self.dt = float(data.get("dt", 0.005))
         self.dx = float(data.get("dx", 1.0 / 63.0))
 
@@ -75,8 +75,10 @@ def train_epoch(
             # Targets: next time step observations
             u_true = u_seq[:, 1:].unsqueeze(2)  # (B, T-1, 1, H, W)
             u_curr = u_seq[:, :-1].unsqueeze(2)  # (B, T-1, 1, H, W)
-
-            loss, metrics = loss_fn(u_pred, u_true, s_pred, u_curr)
+            u_prev = u_seq[:, :-1].clone().unsqueeze(2)
+            u_prev[:, 1:] = u_seq[:, :-2].unsqueeze(2)
+            
+            loss, metrics = loss_fn(u_pred, u_true, s_pred, u_curr, u_prev)
         else:
             # Baseline models (pure neural)
             u_pred, s_pred = model(u_seq)
@@ -115,7 +117,9 @@ def evaluate_epoch(
             u_pred, s_pred, _ = model(u_seq, unroll_steps=unroll_steps)
             u_true = u_seq[:, 1:].unsqueeze(2)
             u_curr = u_seq[:, :-1].unsqueeze(2)
-            _, metrics = loss_fn(u_pred, u_true, s_pred, u_curr)
+            u_prev = u_seq[:, :-1].clone().unsqueeze(2)
+            u_prev[:, 1:] = u_seq[:, :-2].unsqueeze(2)
+            _, metrics = loss_fn(u_pred, u_true, s_pred, u_curr, u_prev)
         else:
             u_pred, s_pred = model(u_seq)
             u_true = u_seq[:, 1:].unsqueeze(2)
@@ -131,7 +135,7 @@ def evaluate_epoch(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Train PhICNet or Baselines")
+    parser = argparse.ArgumentParser(description="Train PhICNet or Baselines for Wave System")
     parser.add_argument("--model", type=str, default="phicnet", choices=["phicnet", "cnn", "conv_lstm"])
     parser.add_argument("--data_dir", type=str, default="data")
     parser.add_argument("--epochs", type=int, default=25)
@@ -140,8 +144,8 @@ def main():
     parser.add_argument("--subseq_len", type=int, default=20)
     parser.add_argument("--hidden_dim", type=int, default=32)
     parser.add_argument("--beta_source", type=float, default=0.1)
-    parser.add_argument("--lambda_sparse", type=float, default=0.001)
-    parser.add_argument("--unroll_steps", type=int, default=4, help="Multi-step unrolled training horizon to eliminate exposure bias")
+    parser.add_argument("--lambda_sparse", type=float, default=0.005)
+    parser.add_argument("--unroll_steps", type=int, default=4, help="Multi-step unrolled training horizon")
     parser.add_argument("--checkpoint_dir", type=str, default="checkpoints")
     args = parser.parse_args()
 
@@ -153,25 +157,25 @@ def main():
     train_npz = os.path.join(args.data_dir, "train.npz")
     val_npz = os.path.join(args.data_dir, "val.npz")
 
-    train_dataset = HeatSequenceDataset(train_npz, subseq_len=args.subseq_len, stride=5)
-    val_dataset = HeatSequenceDataset(val_npz, subseq_len=args.subseq_len, stride=10)
+    train_dataset = WaveSequenceDataset(train_npz, subseq_len=args.subseq_len, stride=5)
+    val_dataset = WaveSequenceDataset(val_npz, subseq_len=args.subseq_len, stride=10)
 
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, pin_memory=torch.cuda.is_available())
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, pin_memory=torch.cuda.is_available())
 
     # Build model
-    alpha = train_dataset.alpha
-    dt = train_dataset.dt
-    dx = train_dataset.dx
+    c_val = train_dataset.c
+    dt_val = train_dataset.dt
+    dx_val = train_dataset.dx
 
     if args.model == "phicnet":
-        model = PhICNet(alpha=alpha, dt=dt, dx=dx, hidden_dim=args.hidden_dim).to(device)
+        model = PhICNet(c=c_val, dt=dt_val, dx=dx_val, hidden_dim=args.hidden_dim, non_negative_source=False).to(device)
         loss_fn = PhICNetLoss(
             beta_source=args.beta_source,
             lambda_sparse=args.lambda_sparse,
-            alpha=alpha,
-            dt=dt,
-            dx=dx
+            c=c_val,
+            dt=dt_val,
+            dx=dx_val
         ).to(device)
     elif args.model == "cnn":
         model = CNNBaseline(hidden_dim=args.hidden_dim).to(device)
@@ -214,9 +218,9 @@ def main():
                 "epoch": epoch,
                 "val_loss": val_total,
                 "model_type": args.model,
-                "alpha": alpha,
-                "dt": dt,
-                "dx": dx,
+                "c": c_val,
+                "dt": dt_val,
+                "dx": dx_val,
                 "hidden_dim": args.hidden_dim
             }, save_path)
             print(f"  --> Saved new best checkpoint to {save_path} (Val Loss: {best_val_loss:.5f})")

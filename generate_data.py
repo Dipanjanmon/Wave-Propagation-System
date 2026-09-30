@@ -1,24 +1,24 @@
 """
-Generate synthetic 2D heat diffusion dataset with unknown external sources.
+Generate synthetic 2D wave propagation dataset with unknown external sources.
 
 Saves train, val, and test splits as compressed NPZ or NPY archives containing:
 - 'u': (N_sequences, seq_len, H, W)
 - 's': (N_sequences, seq_len, H, W)
-- 'params': simulation constants (alpha, dt, dx)
+- 'params': simulation constants (c, dt, dx)
 """
 
 import os
 import argparse
 import numpy as np
 from tqdm import tqdm
-from phicnet.physics.heat_equation import generate_heat_trajectory
+from phicnet.physics.wave_equation import generate_wave_trajectory
 
 
 def generate_dataset_split(
     num_sequences: int,
     grid_size: int = 64,
     seq_len: int = 100,
-    alpha: float = 0.01,
+    c: float = 2.0,
     dt: float = 0.005,
     seed: int = 42,
     split_name: str = "train"
@@ -27,17 +27,17 @@ def generate_dataset_split(
     u_all = np.zeros((num_sequences, seq_len, grid_size, grid_size), dtype=np.float32)
     s_all = np.zeros((num_sequences, seq_len, grid_size, grid_size), dtype=np.float32)
 
-    # Distribute across source types: pulsing (50%), static (30%), moving (20%)
-    source_choices = ["pulsing", "static", "moving"]
-    source_weights = [0.5, 0.3, 0.2]
+    # Distribute across source types: coupled_oscillators (60%), single_oscillator (25%), pulse (15%)
+    source_choices = ["coupled_oscillators", "single_oscillator", "pulse"]
+    source_weights = [0.6, 0.25, 0.15]
 
     print(f"Generating {split_name} split ({num_sequences} sequences of length {seq_len})...")
     for i in tqdm(range(num_sequences), desc=f"Generating {split_name}"):
         stype = rng.choice(source_choices, p=source_weights)
-        u_traj, s_traj, _ = generate_heat_trajectory(
+        u_traj, s_traj, _ = generate_wave_trajectory(
             grid_size=grid_size,
             num_steps=seq_len,
-            alpha=alpha,
+            c=c,
             dt=dt,
             source_type=stype,
             rng=rng
@@ -49,15 +49,15 @@ def generate_dataset_split(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Generate 2D Heat Diffusion Data for PhICNet")
+    parser = argparse.ArgumentParser(description="Generate 2D Wave Propagation Data for PhICNet")
     parser.add_argument("--data_dir", type=str, default="data", help="Directory to save generated datasets")
     parser.add_argument("--train_seqs", type=int, default=60, help="Number of training sequences")
     parser.add_argument("--val_seqs", type=int, default=15, help="Number of validation sequences")
     parser.add_argument("--test_seqs", type=int, default=15, help="Number of test sequences")
     parser.add_argument("--seq_len", type=int, default=100, help="Frames per sequence")
     parser.add_argument("--grid_size", type=int, default=64, help="Grid size H=W")
-    parser.add_argument("--alpha", type=float, default=0.01, help="Diffusivity constant")
-    parser.add_argument("--dt", type=float, default=0.005, help="Time step dt")
+    parser.add_argument("--c", type=float, default=10.0, help="Wave propagation speed c")
+    parser.add_argument("--dt", type=float, default=0.001, help="Time step dt")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     args = parser.parse_args()
 
@@ -75,7 +75,7 @@ def main():
             num_sequences=n_seq,
             grid_size=args.grid_size,
             seq_len=args.seq_len,
-            alpha=args.alpha,
+            c=args.c,
             dt=args.dt,
             seed=seed,
             split_name=name
@@ -85,7 +85,7 @@ def main():
             filepath,
             u=u_data,
             s=s_data,
-            alpha=args.alpha,
+            c=args.c,
             dt=args.dt,
             dx=dx,
             grid_size=args.grid_size
